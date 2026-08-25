@@ -1,0 +1,8 @@
+# The dsh-timeline-enhance bundle patch (declared by the `dsh.bundle.patch`
+# manifest field): one additive row mounting the browser half. The layer is
+# applied after the profile template layers (@deepseek-ai/dsh-base and
+# @deepseek-ai/dsh-web-app for the web profile); it only inserts, so it can
+# never override official rows.
+- insert:
+    - id: timeline-enhance
+      name: dsh-timeline-enhance
