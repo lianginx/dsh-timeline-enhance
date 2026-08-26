@@ -1,7 +1,7 @@
 {
   "name": "dsh-timeline-enhance",
   "description": "DSH Web UI plugin: auto-fold chat timeline processes and Deep diving fun tips",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "license": "MIT",
   "engines": {

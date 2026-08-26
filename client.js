@@ -304,14 +304,20 @@ module.exports = {
     function ensureTipEl(){
       const status=document.querySelector('[role="status"]')
       if(!status) return null
+      // Always strip stray Deep diving text, even when tip already exists — React's TurnStatus
+      // re-renders every second and re-inserts the text node; the old version only stripped
+      // on first creation, so the tip appeared to revert.
+      for(const node of Array.from(status.childNodes)){ if(node.nodeType===3 && node.textContent && node.textContent.includes('Deep diving')) node.remove() }
       let tipSpan=status.querySelector('.dsh-tip-static')
       if(!tipSpan){
         tipSpan=document.createElement('span')
         tipSpan.className='dsh-tip-static'
-        for(const node of Array.from(status.childNodes)){ if(node.nodeType===3 && node.textContent && node.textContent.includes('Deep diving')) node.remove() }
-        const clock=status.querySelector('span')
+        const clock=status.querySelector('span:not(.dsh-tip-static)')
         if(clock) status.insertBefore(tipSpan, clock)
         else status.insertBefore(tipSpan, status.firstChild)
+      } else {
+        const clock=status.querySelector('span:not(.dsh-tip-static)')
+        if(clock && tipSpan.nextSibling !== clock) status.insertBefore(tipSpan, clock)
       }
       return tipSpan
     }
@@ -340,6 +346,7 @@ module.exports = {
         if (!status) return
         const tip = status.querySelector('.dsh-tip-static')
         if (tip) tip.remove()
+        for(const n of Array.from(status.childNodes)){ if(n.nodeType===3 && n.textContent && n.textContent.includes('Deep diving')) n.remove() }
         const hasDeep = Array.from(status.childNodes).some(n=> n.nodeType===3 && n.textContent && n.textContent.includes('Deep diving'))
         if (!hasDeep) {
           const clock = status.querySelector('span')
@@ -358,15 +365,48 @@ module.exports = {
         if (s) ensureDeep(s)
       }
       let lastKind = null
+      let sanitizing = false
+      let statusObs = null
+      let currentStatus = null
+      const maybeSanitize = () => {
+        if(sanitizing) return
+        if(!isFunTipsEnabled()) return
+        const status=document.querySelector('[role="status"]')
+        if(!status) return
+        const hasDeep = Array.from(status.childNodes).some(n=> n.nodeType===3 && n.textContent && n.textContent.includes('Deep diving'))
+        const tip = status.querySelector('.dsh-tip-static')
+        const hasTip = !!tip
+        const tipEmpty = tip && !tip.textContent
+        if(!hasDeep && hasTip && !tipEmpty) return
+        sanitizing = true
+        try { ensureTip() } finally { queueMicrotask(()=>{ sanitizing = false }) }
+      }
+      const attachStatus = (el) => {
+        if(currentStatus === el && statusObs) return
+        if(statusObs){ try{statusObs.disconnect()}catch{}; statusObs=null }
+        currentStatus = el || null
+        if(!el) return
+        // 只监听状态栏本身，不监听全页面，避免对话流式输出触发大量 characterData 回调
+        statusObs = new MutationObserver(()=> maybeSanitize())
+        statusObs.observe(el, {childList:true, characterData:true, subtree:true})
+        maybeSanitize()
+      }
+      attachStatus(document.querySelector('[role="status"]'))
       const obs = new MutationObserver((mutations)=>{
         if (isFunTipsEnabled()) {
-          const status=document.querySelector('[role="status"]')
-          if(status && !status.querySelector('.dsh-tip-static')){
-            const t=ensureTipEl()
-            if(t && !t.textContent) t.textContent=pickForKind('generic')
-          }
+          // 检查状态栏是否新建/重建（React 每秒 tick 会重建 Deep diving 文本，由 statusObs 捕获；这里只负责挂载）
+          const now = document.querySelector('[role="status"]')
+          if(now !== currentStatus) attachStatus(now)
+          // 趣味 tips 按类型切换：只关心新增的流程节点
           for(const m of mutations){
             for(const node of Array.from(m.addedNodes)){
+              if(node.nodeType===1 && node.getAttribute && node.getAttribute('role')==='status'){
+                attachStatus(node)
+              }
+              if(node.nodeType===1 && node.querySelector){
+                const st = node.querySelector('[role="status"]')
+                if(st) attachStatus(st)
+              }
               const k=kindOfAddedNode(node)
               if(k && k!==lastKind){
                 const tip=ensureTipEl()
@@ -386,33 +426,46 @@ module.exports = {
               }
             }
           }
+          // 兜底：如果 statusObs 错过，body 回调里再检查一次
+          const st=document.querySelector('[role="status"]')
+          if(st){
+            const hasDeep = Array.from(st.childNodes).some(n=> n.nodeType===3 && n.textContent && n.textContent.includes('Deep diving'))
+            if(hasDeep) maybeSanitize()
+            if(!st.querySelector('.dsh-tip-static')) maybeSanitize()
+          }
         } else {
+          // 非趣味模式：确保恢复默认，保持原有逻辑但不再监听全页面 characterData
           for(const m of mutations){
             for(const node of Array.from(m.addedNodes)){
               if(node.nodeType===1 && node.getAttribute && node.getAttribute('role')==='status'){
                 ensureDeep(node)
+                attachStatus(null)
               }
               if(node.querySelectorAll){
                 const statuses=node.querySelectorAll('[role="status"]')
-                statuses.forEach(ensureDeep)
+                statuses.forEach(s=>{ ensureDeep(s); attachStatus(null) })
               }
             }
           }
           const s=document.querySelector('[role="status"]')
           if(s) ensureDeep(s)
+          attachStatus(null)
         }
       })
       obs.observe(document.body,{childList:true, subtree:true})
       const offScope = scope.subscribe(()=>{
         if (isFunTipsEnabled()) {
           ensureTip()
+          attachStatus(document.querySelector('[role="status"]'))
+          maybeSanitize()
           lastKind=null
         } else {
           const s=document.querySelector('[role="status"]')
           if(s) ensureDeep(s)
+          attachStatus(null)
         }
       })
-      return ()=>{ obs.disconnect(); offScope() }
+      return ()=>{ obs.disconnect(); if(statusObs) statusObs.disconnect(); offScope() }
     },'tips:per-kind')
     function isEmptyThinkNode(node){const d=node&&node.data; if(!d||!Array.isArray(d.blocks))return false; let hasVisible=false; for(const b of d.blocks){if(b.kind==='reasoning'){if(b.text&&b.text.trim()!=='')hasVisible=true}else if(b.kind==='text'){if(b.text&&b.text.trim()!=='')hasVisible=true}else if(b.kind==='image'||b.kind==='tool-call')hasVisible=true; else if(b.kind==='other')hasVisible=true} return !hasVisible}
     function hasTextBlock(node){const d=node&&node.data; if(!d||!Array.isArray(d.blocks))return false; return d.blocks.some(b=>b.kind==='text'&&b.text&&b.text.trim()!=='')}
